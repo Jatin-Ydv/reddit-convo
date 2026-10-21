@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reddit-convo"
+version = "0.1.0"
+description = "Turn a Reddit thread into an animated conversation video."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+authors = [
+  { name = "Jatin Yadav", email = "Jatin-Ydv@users.noreply.github.com" },
+]
+keywords = ["reddit", "video", "tts", "animation", "cli"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Multimedia :: Video",
+]
+dependencies = [
+  "httpx>=0.27",
+  "pydantic>=2.7",
+  "typer>=0.12",
+  "pillow>=10.3",
+  "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+nlp = [
+  "transformers>=4.40",
+  "torch>=2.2",
+]
+tts = [
+  "piper-tts>=1.2",
+  "onnxruntime>=1.17",
+]
+dev = [
+  "pytest>=8.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Jatin-Ydv/reddit-convo"
+Repository = "https://github.com/Jatin-Ydv/reddit-convo"
+Issues = "https://github.com/Jatin-Ydv/reddit-convo/issues"
+
+[project.scripts]
+reddit-convo = "reddit_convo.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["reddit_convo*"]
+
+[tool.setuptools.package-data]
+reddit_convo = ["assets/scenes/*.png", "assets/characters/*.png"]

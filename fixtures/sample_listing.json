@@ -1,0 +1,71 @@
+[
+  {
+    "kind": "Listing",
+    "data": {
+      "children": [
+        {
+          "kind": "t3",
+          "data": {
+            "id": "listing01",
+            "subreddit": "relationship_advice",
+            "title": "Should I tell my coworker I disagree with the new plan?",
+            "selftext": "We had a meeting today and everyone nodded along. I think the plan is going to blow up. Need advice before I open my mouth.",
+            "author": "office_lurker",
+            "score": 420,
+            "permalink": "/r/relationship_advice/comments/listing01/should_i_tell/"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "kind": "Listing",
+    "data": {
+      "children": [
+        {
+          "kind": "t1",
+          "data": {
+            "id": "x1",
+            "author": "calm_manager",
+            "body": "Ask a question instead of a confrontation. 'Can we walk through the risk if X fails?' works better than 'this is dumb'.",
+            "score": 210,
+            "parent_id": "t3_listing01",
+            "replies": {
+              "kind": "Listing",
+              "data": {
+                "children": [
+                  {
+                    "kind": "t1",
+                    "data": {
+                      "id": "x1r",
+                      "author": "office_lurker",
+                      "body": "That's actually really helpful. I was going to walk in hot.",
+                      "score": 80,
+                      "parent_id": "t1_x1",
+                      "replies": ""
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "kind": "t1",
+          "data": {
+            "id": "x2",
+            "author": "spicy_intern",
+            "body": "Oh great, another hero. I'm sure the VP loves unsolicited debates. /s",
+            "score": 44,
+            "parent_id": "t3_listing01",
+            "replies": ""
+          }
+        },
+        {
+          "kind": "more",
+          "data": { "count": 12, "children": ["abc"] }
+        }
+      ]
+    }
+  }
+]
