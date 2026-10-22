@@ -10,8 +10,8 @@ _WHITESPACE = re.compile(r"\s+")
 _S_TAG = re.compile(r"(?:^|\s)/s\b", re.IGNORECASE)
 
 
-def sanitize_spoken(text: str, max_chars: int = 400) -> str:
-    """Strip Reddit markup for TTS. Keep meaning, drop /s and URLs."""
+def sanitize_spoken(text: str) -> str:
+    """Strip Reddit markup for TTS. Keep meaning, drop /s and URLs. No length cap."""
     cleaned = _MD_LINK.sub(r"\1", text)
     cleaned = _URL.sub("link", cleaned)
     cleaned = _S_TAG.sub("", cleaned)
@@ -20,16 +20,12 @@ def sanitize_spoken(text: str, max_chars: int = 400) -> str:
     cleaned = cleaned.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
     cleaned = cleaned.replace("&#x200B;", "").replace("&nbsp;", " ")
     cleaned = _WHITESPACE.sub(" ", cleaned).strip()
-    if len(cleaned) > max_chars:
-        cleaned = cleaned[: max_chars - 1].rsplit(" ", 1)[0] + "…"
     return cleaned
 
 
-def truncate_body(text: str, max_chars: int = 400) -> str:
-    text = text.strip()
-    if len(text) <= max_chars:
-        return text
-    return text[: max_chars - 1].rsplit(" ", 1)[0] + "…"
+def truncate_body(text: str) -> str:
+    """Normalize comment body text. Kept for call-site compatibility; no length cap."""
+    return text.strip()
 
 
 def looks_unusable(author: str, body: str) -> bool:

@@ -61,6 +61,9 @@ POSES: dict[str, Pose] = {
     "pocket_talk": Pose((32, 96, "open"), (20, -22, "pocket"), stance=14),
     "wave": Pose((122, 174, "wave"), (10, 4, "open")),
     "facepalm": Pose((18, -172, "open"), (24, -96, "open"), slump=0.4, tilt=-6),
+    "belly": Pose((24, -72, "open"), (24, -72, "open"), crouch=0.18, tilt=-8, lean=-3),
+    "palms_up": Pose((30, 74, "open"), (30, 74, "open"), shrug=0.45, tilt=7),
+    "stop": Pose((64, 116, "open"), (16, -40, "open"), lean=-5, tilt=-4),
 }
 
 
@@ -238,6 +241,10 @@ def _hand(d, pos, hand: str, side: int, fore: float, H: float, skin, ol: int) ->
 # ---------------------------------------------------------------- head & face
 
 
+def _tint(base: tuple[int, ...], color: tuple[int, int, int], a: float) -> tuple[int, int, int]:
+    return tuple(int(b + (c - b) * a) for b, c in zip(base[:3], color))  # type: ignore[return-value]
+
+
 def _px(r: float, n: float) -> int:
     return max(1, int(n * r / 70))
 
@@ -259,6 +266,13 @@ EXPRESSIONS: dict[str, tuple[str, str, str]] = {
     "thinking": ("up", "one_up", "side"),
     "sympathetic": ("sad", "sad", "small_smile"),
     "proud": ("happy", "raised", "smile"),
+    "excited": ("wide", "raised", "grin"),
+    "confident": ("open", "one_up", "smile"),
+    "skeptical": ("half", "one_up", "side"),
+    "curious": ("open", "one_up", "small_smile"),
+    "furious": ("angry", "angry", "teeth"),
+    "disgusted": ("half", "angry", "wobbly"),
+    "nervous": ("pinned", "worried", "small_smile"),
 }
 
 _BROW_REST = {"flat": "flat", "soft": "raised", "raised_right": "one_up", "thick": "flat", "worried": "worried"}
@@ -292,10 +306,18 @@ def draw_face(d: ImageDraw.ImageDraw, spec: Personality, cx: float, cy: float, r
     lw = max(2, int(0.05 * r))
     thin = max(1, int(0.03 * r))
 
-    if spec.blush or act.expr in {"love", "laugh", "proud"}:
+    # the head layer is drawn without alpha blending, so tints must be opaque pre-mixed colours
+    face = spec.skin
+    if act.expr == "furious":
+        face = _tint(spec.skin, (235, 60, 50), 0.3)
+        d.ellipse((cx - 0.84 * r, cy - 0.84 * r, cx + 0.84 * r, cy + 0.22 * r), fill=face)
+    elif act.expr == "disgusted":
+        d.ellipse((cx - 0.66 * r, cy + 0.12 * r, cx + 0.8 * r, cy + 0.74 * r), fill=_tint(spec.skin, (120, 190, 90), 0.28))
+    if spec.blush or act.expr in {"love", "laugh", "proud", "excited", "nervous"}:
+        blush = _tint(spec.skin, (255, 120, 130), 0.45)
         for side in (-1, 1):
             bx = fx + side * 0.56 * r
-            d.ellipse((bx - 0.15 * r, cy + 0.17 * r, bx + 0.15 * r, cy + 0.29 * r), fill=(255, 120, 130, 110))
+            d.ellipse((bx - 0.15 * r, cy + 0.17 * r, bx + 0.15 * r, cy + 0.29 * r), fill=blush)
 
     for side in (-1, 1):
         ex = fx + side * edx
@@ -334,16 +356,16 @@ def draw_face(d: ImageDraw.ImageDraw, spec: Personality, cx: float, cy: float, r
         if eyes == "angry":
             lo = (ex + inner * w * 1.1, ey - 0.05 * h)
             hi = (ex - inner * w * 1.1, ey - 0.75 * h)
-            d.polygon([(lo[0], top), lo, hi, (hi[0], top)], fill=spec.skin)
+            d.polygon([(lo[0], top), lo, hi, (hi[0], top)], fill=face)
             d.line([lo, hi], fill=INK, width=lw)
         elif eyes == "sad":
             lo = (ex - inner * w * 1.1, ey - 0.1 * h)
             hi = (ex + inner * w * 1.1, ey - 0.72 * h)
-            d.polygon([(lo[0], top), lo, hi, (hi[0], top)], fill=spec.skin)
+            d.polygon([(lo[0], top), lo, hi, (hi[0], top)], fill=face)
             d.line([lo, hi], fill=INK, width=lw)
         elif lid > 0.05:
             ly = ey - h + 2 * h * lid
-            d.rectangle((ex - w - thin * 2, top, ex + w + thin * 2, ly), fill=spec.skin)
+            d.rectangle((ex - w - thin * 2, top, ex + w + thin * 2, ly), fill=face)
             d.line([(ex - w * 1.05, ly), (ex + w * 1.05, ly)], fill=INK, width=lw)
 
     if act.expr == "cry":
@@ -412,7 +434,15 @@ def _mouth(d, mx: float, my: float, r: float, mode: str, openness: float) -> Non
             d.line([(mx - 0.16 * r, my + 0.02 * r), (mx + 0.16 * r, my + 0.02 * r)], fill=INK, width=lw)
         return
 
-    if mode in {"smile", "small_smile", "grin", "flat", "side"}:
+    if mode in {"flat", "side"}:
+        h = r * (0.06 + 0.2 * o)
+        w = mw * (0.62 if mode == "flat" else 0.55)
+        ox = 0.05 * r if mode == "side" else 0.0
+        box = (mx + ox - w / 2, my - h * 0.7, mx + ox + w / 2, my + h * 0.9)
+        d.ellipse(box, fill=MOUTH, outline=INK, width=lw)
+        if o > 0.35:
+            d.ellipse((mx + ox - w * 0.22, my + h * 0.2, mx + ox + w * 0.22, my + h * 0.8), fill=TONGUE)
+    elif mode in {"smile", "small_smile", "grin"}:
         h = r * (0.1 + 0.34 * o)
         w = mw * (1.15 if mode == "grin" else 0.95)
         top = my - 0.06 * r

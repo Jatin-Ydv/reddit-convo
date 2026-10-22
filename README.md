@@ -2,6 +2,8 @@
 
 Turn a Reddit post into an animated conversation video.
 
+> **TRY IT OUT, IT IS FUN** — this isn’t a solemn utility. Paste a spicy, wholesome, or chaotic thread, watch stick figures argue about it, and share the clip. Use it because it’s fun.
+
 Paste a thread URL. The tool fetches the discussion, tags tone and emotion, assigns stick-figure personalities, synthesizes speech, and renders an MP4 where you can see **who is talking** and **who they are replying to**.
 
 No Reddit API key required.
@@ -14,8 +16,9 @@ No Reddit API key required.
 - **Thread-aware staging** — speaker + listener up front, the rest of the cast stays in the room
 - **Clear reply context** — name pills, “replying to” header, parent quote, depth markers
 - **Expressive stick figures** — personalities (host, kind, cynic, spark, worry, cool, bookish), poses, emotes
+- **Sentence-level acting** — every sentence is read for its own mood (laughing, ranting, disgusted, encouraging, skeptical, asking…), so faces, gestures and the listener's reaction change mid-comment
 - **Scene matching** — park, café, gym, office, debate stage, campfire, perfume boutique, living room
-- **Local TTS** — Piper voices when installed, with an espeak-ng fallback
+- **Expressive local TTS** — Piper voices with per-sentence pace, pitch, loudness, pauses and rising questions shaped by mood and personality; espeak-ng fallback
 - **Optional NLP** — DistilBERT emotion/sarcasm tagging when you install the `nlp` extras
 
 ## Requirements
@@ -84,8 +87,8 @@ python -m reddit_convo.cli "https://www.reddit.com/r/..." --out out.mp4
 ### Example flow
 
 1. Fetch the post (Reddit JSON when available; archive/RSS fallbacks otherwise)
-2. Build a dialogue script with emotion, sarcasm, and speaker personalities
-3. Synthesize each turn with Piper (or espeak)
+2. Build a dialogue script with emotion, sarcasm, speaker personalities, and per-sentence mood beats
+3. Synthesize each beat with Piper (or espeak) using mood-specific delivery, and record its timing
 4. Render stick-figure animation + speech bubbles into an H.264 MP4
 
 Intermediates land in `cache/<post_id>/` so you can inspect `script.json`, WAVs, and logs.
@@ -118,6 +121,7 @@ python -m reddit_convo.render.art
 
 ## Notes
 
+- Reply edges follow Reddit’s real parent/child links: a comment that replies to another commenter faces that person on screen, not always the OP. When Reddit blocks JSON, we recover parents from per-comment context RSS (slower, and rate limits may leave some replies flat).
 - Reddit sometimes rate-limits or blocks datacenter IPs. The fetcher falls back to public archives and RSS when that happens.
 - Long threads take a while: rendering is roughly a few seconds of wall time per second of video on a typical laptop CPU.
 - Comment text is shown as written, including profanity from the original thread.

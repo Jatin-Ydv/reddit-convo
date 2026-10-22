@@ -80,6 +80,21 @@ class SpeakerGraph(BaseModel):
     author_to_speaker: dict[str, str] = Field(default_factory=dict)
 
 
+class Beat(BaseModel):
+    """One sentence-sized acting unit inside a turn."""
+
+    text: str
+    char_start: int = 0
+    char_end: int = 0
+    mood: str = "neutral"
+    intensity: float = 0.5
+    expression: str = "neutral"
+    emote: str | None = None
+    pose: str | None = None
+    start_ms: int = 0
+    end_ms: int = 0
+
+
 class DialogueTurn(BaseModel):
     index: int
     speaker_id: str
@@ -98,6 +113,7 @@ class DialogueTurn(BaseModel):
     tone: Tone = "calm"
     expression: Expression = "rest"
     score: int = 0
+    beats: list[Beat] = Field(default_factory=list)
     audio_path: str | None = None
     duration_ms: int = 0
 

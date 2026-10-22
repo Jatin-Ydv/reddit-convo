@@ -4,6 +4,7 @@ import html as htmlmod
 import json
 import logging
 import re
+import time
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlparse
@@ -280,6 +281,9 @@ def _rss_comments(subreddit: str, post_id: str, timeout: float) -> list[dict]:
                 return []
             comments = parse_comment_rss(response.content, post_id)
             if comments:
+                comments = _enrich_parents_via_context(
+                    client, subreddit or "", post_id, comments
+                )
                 log.info("Loaded %s comments from Reddit RSS", len(comments))
             return comments
     except (httpx.HTTPError, ET.ParseError, ValueError) as exc:
@@ -288,38 +292,158 @@ def _rss_comments(subreddit: str, post_id: str, timeout: float) -> list[dict]:
 
 
 def parse_comment_rss(xml_bytes: bytes, post_id: str) -> list[dict]:
-    root = ET.fromstring(xml_bytes)
-    entries = root.findall("a:entry", _ATOM_NS)
+    """Parse a thread Atom feed. Parents default to the post; enrich later via context RSS."""
     comments: list[dict] = []
-    for index, entry in enumerate(entries):
-        href = ""
-        for link in entry.findall("a:link", _ATOM_NS):
-            if link.get("rel") in {None, "alternate"}:
-                href = link.get("href") or ""
-                break
-        comment_id = _comment_id_from_permalink(href, post_id)
+    for index, entry in enumerate(_atom_entries(xml_bytes)):
+        comment_id = entry["id"]
         if index == 0 and (not comment_id or comment_id == post_id):
             continue
-        author = entry.findtext("a:author/a:name", default="", namespaces=_ATOM_NS) or "[deleted]"
-        author = re.sub(r"^/u/", "", author).lstrip("/")
-        if author.startswith("u/"):
-            author = author[2:]
-        content = entry.findtext("a:content", default="", namespaces=_ATOM_NS) or ""
-        body = _html_to_text(content)
         if not comment_id:
             comment_id = f"rss{index}"
-        if looks_unusable(author, body):
+        if looks_unusable(entry["author"], entry["body"]):
             continue
         comments.append(
             {
                 "id": comment_id,
-                "author": author,
-                "body": body,
+                "author": entry["author"],
+                "body": entry["body"],
                 "score": 1,
                 "parent_id": f"t3_{post_id}",
             }
         )
     return comments
+
+
+def parse_context_rss(xml_bytes: bytes, post_id: str, comment_id: str) -> list[dict]:
+    """Parse a per-comment context feed into the ancestor chain ending at comment_id.
+
+    Reddit's `/comments/{post}/_/{comment}/.rss` lists the post, then parents root→leaf,
+    then the comment. We return that chain with correct parent_id links.
+    """
+    chain: list[dict] = []
+    for index, entry in enumerate(_atom_entries(xml_bytes)):
+        cid = entry["id"]
+        if index == 0 and (not cid or cid == post_id):
+            continue
+        if not cid or looks_unusable(entry["author"], entry["body"]):
+            continue
+        parent_id = f"t3_{post_id}" if not chain else f"t1_{chain[-1]['id']}"
+        chain.append(
+            {
+                "id": cid,
+                "author": entry["author"],
+                "body": entry["body"],
+                "score": 1,
+                "parent_id": parent_id,
+            }
+        )
+        if cid == comment_id:
+            break
+    return chain
+
+
+def _atom_entries(xml_bytes: bytes) -> list[dict]:
+    root = ET.fromstring(xml_bytes)
+    out: list[dict] = []
+    for entry in root.findall("a:entry", _ATOM_NS):
+        href = ""
+        for link in entry.findall("a:link", _ATOM_NS):
+            if link.get("rel") in {None, "alternate"}:
+                href = link.get("href") or ""
+                break
+        author = entry.findtext("a:author/a:name", default="", namespaces=_ATOM_NS) or "[deleted]"
+        author = re.sub(r"^/u/", "", author).lstrip("/")
+        if author.startswith("u/"):
+            author = author[2:]
+        content = entry.findtext("a:content", default="", namespaces=_ATOM_NS) or ""
+        # post_id is unknown here for id extraction of first entry; pass empty and fix callers
+        post_guess = ""
+        parts = [p for p in urlparse(href).path.strip("/").split("/") if p]
+        try:
+            idx = parts.index("comments")
+            if len(parts) > idx + 1:
+                post_guess = parts[idx + 1]
+        except ValueError:
+            post_guess = ""
+        out.append(
+            {
+                "id": _comment_id_from_permalink(href, post_guess),
+                "author": author,
+                "body": _html_to_text(content),
+                "href": href,
+            }
+        )
+    return out
+
+
+def _enrich_parents_via_context(
+    client: httpx.Client,
+    subreddit: str,
+    post_id: str,
+    comments: list[dict],
+    *,
+    pause_s: float = 0.8,
+) -> list[dict]:
+    """Fill parent_id (and missing ancestors) using Reddit comment-context RSS feeds.
+
+    Thread RSS lists every comment as if it replied to the post. The per-comment
+    context feed (`/comments/{post}/_/{id}/.rss`) returns the ancestor chain so we
+    can restore who was actually replying to whom.
+    """
+    if not subreddit or not comments:
+        return comments
+    by_id = {c["id"]: dict(c) for c in comments}
+    nested = 0
+    # Brief pause so the main-thread RSS request does not immediately trip rate limits.
+    time.sleep(1.0)
+    for index, comment in enumerate(list(comments)):
+        cid = comment["id"]
+        if not cid or cid.startswith("rss"):
+            continue
+        url = f"https://www.reddit.com/r/{subreddit}/comments/{post_id}/_/{cid}/.rss?context=8"
+        response = None
+        for attempt in range(3):
+            try:
+                response = client.get(url)
+            except httpx.HTTPError as exc:
+                log.debug("Context RSS failed for %s: %s", cid, exc)
+                break
+            if response.status_code != 429:
+                break
+            wait = 15 * (attempt + 1)
+            log.info("Context RSS rate-limited; sleeping %ss (%s/%s)", wait, index + 1, len(comments))
+            time.sleep(wait)
+        if response is None or response.status_code == 429:
+            log.warning(
+                "Reddit rate-limited context RSS after %s/%s; remaining comments stay as replies to OP",
+                index,
+                len(comments),
+            )
+            break
+        if response.status_code != 200 or not response.content:
+            continue
+        try:
+            chain = parse_context_rss(response.content, post_id, cid)
+        except (ET.ParseError, ValueError) as exc:
+            log.debug("Context RSS parse failed for %s: %s", cid, exc)
+            continue
+        if not chain:
+            continue
+        for node in chain:
+            existing = by_id.get(node["id"])
+            if existing is None:
+                by_id[node["id"]] = node
+            elif node["id"] == cid or existing.get("parent_id") in {None, "", f"t3_{post_id}"}:
+                existing["parent_id"] = node["parent_id"]
+        if by_id[cid].get("parent_id", "").startswith("t1_"):
+            nested += 1
+        if index + 1 < len(comments) and pause_s:
+            time.sleep(pause_s)
+    if nested:
+        log.info("Restored %s nested reply link(s) via context RSS", nested)
+    else:
+        log.info("Context RSS found no nested replies (thread may be flat top-level comments)")
+    return list(by_id.values())
 
 
 def _comment_id_from_permalink(href: str, post_id: str) -> str:
@@ -379,9 +503,13 @@ def thread_from_flat(post: dict, comments: list[dict], requested_url: str = "") 
 
 
 def _tree_from_flat(post_id: str, comments: list[dict]) -> list[CommentNode]:
+    known = {post_id} | {_bare_id(str(row.get("id") or "")) for row in comments}
     by_parent: dict[str, list[dict]] = {}
     for row in comments:
         parent = _bare_id(str(row.get("parent_id") or post_id))
+        # Orphan replies (parent not in this fetch) hang off the post so they are not dropped.
+        if parent not in known:
+            parent = post_id
         by_parent.setdefault(parent, []).append(row)
 
     def build(parent_id: str, depth: int) -> list[CommentNode]:

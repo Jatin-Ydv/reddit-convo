@@ -1,5 +1,11 @@
 # Why use reddit-convo?
 
+## TRY IT OUT, IT IS FUN
+
+This is not a sober productivity tool. It’s a toy that turns Reddit drama into a stick-figure movie. Paste a thread you’d laugh about with friends, hit render, and watch the cast roast each other. Share the MP4 because it’s fun — not because you needed another CLI in your life.
+
+---
+
 Most Reddit tools scrape text or dump screenshots. This one turns a thread into something you can **watch**: a short animated conversation where the cast, replies, and tone are obvious without reading a wall of comments.
 
 ## What you get
@@ -42,4 +48,4 @@ Most Reddit tools scrape text or dump screenshots. This one turns a thread into 
 
 ## Bottom line
 
-Use it when you want people to *see* a Reddit conversation — who’s talking, who’s roasting whom, and how the room reacts — without asking them to scroll.
+**TRY IT OUT, IT IS FUN.** Use it when you want people to *see* a Reddit conversation — who’s talking, who’s roasting whom, and how the room reacts — without asking them to scroll. Utility is a side effect; the point is the laugh.

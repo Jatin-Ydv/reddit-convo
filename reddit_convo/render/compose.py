@@ -12,7 +12,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 
-from reddit_convo.models import DialogueTurn, Script, Speaker
+from reddit_convo.models import Beat, DialogueTurn, Script, Speaker
+from reddit_convo.preprocess.beats import dominant_mood
 from reddit_convo.render.art import (
     HEIGHT,
     WIDTH,
@@ -57,9 +58,6 @@ IDLE_POSE = {
     "cool": "pockets",
     "bookish": "chin",
 }
-EMO_POSE = {"anger": "fists", "joy": "cheer", "love": "heart", "sadness": "slump", "fear": "defend", "surprise": "cheeks"}
-EMO_EXPR = {"anger": "angry", "joy": "happy", "love": "love", "sadness": "sad", "fear": "scared", "surprise": "surprised"}
-EMO_EMOTE = {"anger": "anger", "love": "hearts", "sadness": "gloom", "fear": "sweat", "joy": "sparkle"}
 
 
 class RenderError(RuntimeError):
@@ -98,6 +96,8 @@ class TurnPlan:
     slots: dict[str, float]
     pages: list[list[str]]
     page_starts: list[int]
+    page_chars: list[int] = field(default_factory=list)
+    beat_spans: list[tuple[int, int, Beat]] = field(default_factory=list)
     speaker_keys: list[tuple[int, str]] = field(default_factory=list)
     react_start: int = 0
     reaction: tuple[str, str, str | None] = ("neutral", "relaxed", None)
@@ -192,9 +192,11 @@ def plan_turns(script: Script, looks: dict[str, Personality]) -> list[TurnPlan]:
         prev_sides = sides
         slots = {sid: SLOT_X[side] for sid, side in sides.items()}
 
-        pages = _paginate(turn.spoken_text or turn.text, font, TEXT_W)
-        lead = int(0.28 * FPS) if turn.sarcasm else 0
-        page_starts = _page_starts(pages, lead, speech)
+        text = turn.spoken_text or turn.text
+        pages = _paginate(text, font, TEXT_W)
+        spans = beat_spans(turn, text, speech)
+        page_chars = _page_char_starts(text, pages)
+        page_starts = [0] + [_char_to_frame(spans, c) for c in page_chars[1:]]
 
         plan = TurnPlan(
             turn=turn,
@@ -207,9 +209,11 @@ def plan_turns(script: Script, looks: dict[str, Personality]) -> list[TurnPlan]:
             slots=slots,
             pages=pages,
             page_starts=page_starts,
+            page_chars=page_chars,
+            beat_spans=spans,
         )
         spec = looks[speaker.id]
-        plan.speaker_keys = _speaker_keys(turn, spec, speech, listener is not None)
+        plan.speaker_keys = _speaker_keys(turn, spec, speech, listener is not None, spans)
         if listener:
             plan.react_start = int(max(speech * 0.45, speech - FPS * 4))
             plan.reaction = _reaction(turn, looks[listener.id])
@@ -256,21 +260,74 @@ def _paginate(text: str, font, max_w: int, per_page: int = 3) -> list[list[str]]
     return [lines[i : i + per_page] for i in range(0, len(lines), per_page)]
 
 
-def _page_starts(pages: list[list[str]], lead: int, speech: int) -> list[int]:
-    weights = [sum(len(line) for line in page) + 6 for page in pages]
-    total = sum(weights)
-    span = max(1, speech - lead)
-    starts, acc = [], 0
-    for w in weights:
-        starts.append(lead + int(span * acc / total) if acc else 0)
-        acc += w
+def _page_char_starts(text: str, pages: list[list[str]]) -> list[int]:
+    """Char offset in ``text`` where each page begins."""
+    cur, starts = 0, []
+    for page in pages:
+        first = None
+        for line in page:
+            for word in line.split(" "):
+                word = word.rstrip("-")
+                k = text.find(word, cur) if word else -1
+                if k < 0:
+                    continue
+                if first is None:
+                    first = k
+                cur = k + len(word)
+        starts.append(cur if first is None else first)
     return starts
 
 
-def _speaker_keys(turn: DialogueTurn, spec: Personality, speech: int, has_listener: bool) -> list[tuple[int, str]]:
+def beat_spans(turn: DialogueTurn, text: str, speech: int) -> list[tuple[int, int, Beat]]:
+    """Frame span of every beat inside the turn (relative to turn start)."""
+    beats = turn.beats or [Beat(text=text, char_end=len(text), mood="sarcastic" if turn.sarcasm else "neutral",
+                                expression="smirk" if turn.sarcasm else "neutral")]
+    if all(b.end_ms > 0 for b in beats):
+        spans = [(round(b.start_ms * FPS / 1000), round(b.end_ms * FPS / 1000), b) for b in beats]
+    else:
+        lead = int(0.28 * FPS) if turn.sarcasm else 0
+        total = sum(max(b.char_end - b.char_start, 1) for b in beats)
+        acc, spans = 0, []
+        for b in beats:
+            s0 = lead + (speech - lead) * acc // total
+            acc += max(b.char_end - b.char_start, 1)
+            spans.append((s0, lead + (speech - lead) * acc // total, b))
+    return [(min(s0, speech), max(min(e0, speech), min(s0, speech) + 1), b) for s0, e0, b in spans]
+
+
+def _beat_index(spans: list[tuple[int, int, Beat]], i: int, lag: int = 0) -> int:
+    idx = 0
+    for n, (s0, _, _) in enumerate(spans):
+        if s0 + lag <= i:
+            idx = n
+    return idx
+
+
+def _char_to_frame(spans: list[tuple[int, int, Beat]], c: int) -> int:
+    for s0, e0, b in spans:
+        if c < b.char_end:
+            u = (c - b.char_start) / max(b.char_end - b.char_start, 1)
+            return int(s0 + max(0.0, u) * (e0 - s0))
+    return spans[-1][1] if spans else 0
+
+
+def _frame_to_char(spans: list[tuple[int, int, Beat]], i: int) -> float:
+    if not spans:
+        return 0.0
+    s0, e0, b = spans[_beat_index(spans, i)]
+    u = max(0.0, min(1.0, (i - s0) / max(e0 - s0, 1)))
+    return b.char_start + u * (b.char_end - b.char_start)
+
+
+def _speaker_keys(
+    turn: DialogueTurn,
+    spec: Personality,
+    speech: int,
+    has_listener: bool,
+    spans: list[tuple[int, int, Beat]],
+) -> list[tuple[int, str]]:
     idle = IDLE_POSE.get(spec.id, "relaxed")
     talk = TALK_POSES.get(spec.id, TALK_POSES["host"])
-    emo = "shrug" if turn.sarcasm else EMO_POSE.get(turn.emotion)
     keys: list[tuple[int, str]] = [(-100, idle)]
     f = 0
     if turn.index == 0:
@@ -278,38 +335,97 @@ def _speaker_keys(turn: DialogueTurn, spec: Personality, speech: int, has_listen
         f = int(FPS * 1.1)
     elif has_listener:
         keys.append((0, "point"))
-        f = int(FPS * 0.9)
-    seq = [p for p in (emo, talk[0], talk[1], emo, talk[2]) if p]
+        f = int(FPS * 0.7)
     seed = sum(ord(c) for c in turn.author)
     k = 0
-    while f < speech - FPS // 2:
-        keys.append((f, seq[k % len(seq)]))
-        f += int(FPS * (1.5 + ((seed + k) % 3) * 0.45))
+    for s0, e0, b in spans:
+        s0 = max(s0, f)
+        if e0 - s0 < FPS // 3:
+            continue
+        keys.append((s0, b.pose or talk[k % len(talk)]))
         k += 1
+        g = s0 + int(FPS * (1.5 + ((seed + k) % 3) * 0.4))
+        while g < e0 - FPS // 2:
+            alt = talk[k % len(talk)]
+            keys.append((g, b.pose if (b.pose and k % 2 == 0) else alt))
+            k += 1
+            g += int(FPS * (1.4 + ((seed + k) % 3) * 0.45))
+        f = s0 + 1
     keys.append((speech, idle))
+    keys.sort(key=lambda kv: kv[0])
     return keys
 
 
+POSITIVE_MOODS = {"happy", "excited", "laugh", "love", "grateful", "proud", "encouraging", "confident", "agree"}
+NOD_MOODS = {"agree", "confident", "encouraging", "proud", "grateful", "sympathetic", "sad", "thinking"}
+SHAKE_MOODS = {"disagree", "annoyed", "disgusted"}
+EMOTE_HOLD = {"exclaim": 1.6, "shock": 1.4, "question": 2.4, "sparkle": 1.8, "dots": 2.2}
+
+
+def _reaction_to(mood: str, intensity: float, spec: Personality) -> tuple[str, str, str | None]:
+    """How a listener with this personality reacts to a beat: (expression, pose, emote)."""
+    pid, hot = spec.id, intensity >= 0.7
+    idle = IDLE_POSE.get(pid, "relaxed")
+    if mood in {"laugh", "excited"}:
+        if pid == "cynic":
+            return ("smirk", "crossed", None)
+        return ("laugh", "cheer" if spec.energy > 0.9 and hot else "belly", "sparkle" if hot else None)
+    if mood == "happy":
+        return ("happy", "clasp" if pid != "spark" else "hips", None)
+    if mood in {"love", "grateful", "encouraging"}:
+        if pid == "cynic":
+            return ("smirk", "crossed", None)
+        if mood == "encouraging":
+            return ("proud", "heart" if hot else "clasp", "sparkle" if hot else None)
+        return ("love" if hot else "happy", "heart", "hearts" if hot else None)
+    if mood == "proud":
+        return ("eyeroll", "crossed", None) if pid == "cynic" else ("happy", "clasp", "sparkle")
+    if mood == "confident":
+        return ("thinking" if not hot else "curious", "chin", None)
+    if mood == "agree":
+        return ("happy", "hips" if pid == "spark" else idle, None)
+    if mood == "disagree":
+        if pid == "spark":
+            return ("annoyed", "hips", None)
+        return ("skeptical", "crossed" if pid in {"cynic", "cool"} else "chin", None)
+    if mood == "angry":
+        if pid == "spark":
+            return ("furious" if hot else "angry", "fists", "anger")
+        if pid in {"cynic", "cool"}:
+            return ("annoyed", "crossed", "dots")
+        return ("scared" if hot else "nervous", "defend", "sweat")
+    if mood == "annoyed":
+        if pid in {"cynic", "cool"}:
+            return ("smirk", "crossed", None)
+        return ("nervous", "wring", "sweat")
+    if mood == "disgusted":
+        return ("laugh", "belly", None) if pid == "spark" else ("disgusted", "crossed", None)
+    if mood == "sarcastic":
+        return ("eyeroll" if pid == "cynic" else "annoyed", "crossed", "dots")
+    if mood in {"sad", "sympathetic"}:
+        return ("sad" if hot else "sympathetic", "heart", None)
+    if mood == "worried":
+        return ("sympathetic", "clasp", None) if pid != "worry" else ("worried", "wring", "sweat")
+    if mood == "surprised":
+        return ("surprised", "cheeks" if hot else idle, "exclaim")
+    if mood == "curious":
+        return ("thinking", "chin", "dots")
+    if mood == "thinking":
+        return ("curious", idle, None)
+    return ("happy" if spec.rest_smile else "neutral", idle, None)
+
+
 def _reaction(turn: DialogueTurn, spec: Personality) -> tuple[str, str, str | None]:
-    """How the listener reacts: (expression, pose, emote)."""
-    if turn.sarcasm:
-        return ("eyeroll" if spec.id == "cynic" else "annoyed", "crossed", "dots")
-    e = turn.emotion
-    if e == "anger" or turn.tone == "heated":
-        return ("angry", "fists", "anger") if spec.id == "spark" else ("scared", "defend", "sweat")
-    if e == "love" or turn.tone == "supportive":
-        return ("smirk", "crossed", None) if spec.id == "cynic" else ("love", "heart", "hearts")
-    if e == "joy":
-        return ("laugh", "cheer" if spec.energy > 0.9 else "clasp", "sparkle")
-    if e == "sadness":
-        return ("sympathetic", "heart", None)
-    if e == "fear":
-        return ("worried", "wring", "sweat")
-    if e == "surprise":
-        return ("surprised", "cheeks", "exclaim")
-    if "?" in turn.text:
-        return ("thinking", "chin", "question")
-    return ("happy" if spec.rest_smile else "neutral", IDLE_POSE.get(spec.id, "relaxed"), None)
+    """Overall reaction to a turn: listener reaction shot and bystander faces."""
+    if turn.beats:
+        mood, intensity = dominant_mood(turn.beats)
+    else:
+        mood = "sarcastic" if turn.sarcasm else EMOTION_MOOD.get(turn.emotion, "neutral")
+        intensity = 0.6
+    return _reaction_to(mood, intensity, spec)
+
+
+EMOTION_MOOD = {"anger": "angry", "joy": "happy", "love": "love", "sadness": "sad", "fear": "worried", "surprise": "surprised"}
 
 
 # ---------------------------------------------------------------- crowd
@@ -412,82 +528,88 @@ def _camera(plan: TurnPlan, i: int, gf: int) -> Cam:
 
 
 def _speaker_act(plan: TurnPlan, spec: Personality, i: int, gf: int) -> tuple[Act, str | None, float]:
-    turn = plan.turn
     talking = i < plan.speech
     t = i / FPS
     rms = float(plan.env[i]) if talking else 0.0
     seed = plan.speaker.sprite_index * 7 + 3
+    s0, e0, beat = plan.beat_spans[_beat_index(plan.beat_spans, i)]
+    since = (i - s0) / FPS
+    mood, power = beat.mood, beat.intensity
+
     if not talking:
-        expr = "neutral"
-    elif turn.sarcasm:
-        expr = "eyeroll" if int(t / 1.6) % 3 == 2 else "smirk"
-    elif turn.emotion == "joy":
-        expr = "laugh" if rms > 0.55 else "happy"
-    elif turn.emotion in EMO_EXPR:
-        expr = EMO_EXPR[turn.emotion]
-    elif turn.tone == "supportive":
-        expr = "happy"
-    elif turn.text.rstrip().endswith("?") and t > plan.speech / FPS - 1.6:
-        expr = "thinking"
+        expr = "happy" if mood in POSITIVE_MOODS else ("smirk" if mood == "sarcastic" else "neutral")
     else:
-        expr = "neutral"
+        expr = beat.expression
+        if mood == "sarcastic":
+            expr = "eyeroll" if int(since / 1.6) % 3 == 2 else "smirk"
+        elif mood in {"laugh", "excited", "happy"} and rms > 0.62:
+            expr = "laugh"
+        elif mood == "neutral" and beat.text.rstrip().endswith("?"):
+            expr = "curious"
+
+    accent = power * math.exp(-since * 3.0) if talking else 0.0
+    head_shake = 5.0 * math.sin(since * 14) * math.exp(-since * 1.6) if talking and mood in SHAKE_MOODS else 0.0
     bounce = 0.012 * abs(math.sin(t * math.pi * 2.2)) * spec.energy if (spec.idle == "bounce" and talking) else 0.0
     shake = 0.0
-    if expr == "scared":
-        shake = 1.4 * math.sin(t * 40)
-    elif spec.idle == "fidget":
+    if expr in {"scared", "furious"}:
+        shake = (1.4 if expr == "scared" else 1.0) * math.sin(t * 42)
+    elif expr == "nervous" or spec.idle == "fidget":
         shake = 0.6 * math.sin(t * 17)
     act = Act(
         pose=_pose_at(plan.speaker_keys, i),
         expr=expr,
-        mouth=min(1.0, rms * 1.25),
-        blink=_blink(gf, seed),
+        mouth=min(1.0, rms * (1.1 + 0.4 * power)),
+        blink=_blink(gf, seed) if since > 0.25 else max(_blink(gf, seed), 1.0 if 0.08 < since < 0.16 else 0.0),
         look=0.9 if plan.listener else 0.2,
-        tilt=3 * math.sin(t * 1.3 + seed) * spec.energy + rms * 4,
-        nod=rms * (0.5 + 0.5 * math.sin(t * 7.5)),
+        tilt=3 * math.sin(t * 1.3 + seed) * spec.energy + rms * 4 + 7 * accent + head_shake,
+        nod=rms * (0.5 + 0.5 * math.sin(t * 7.5)) + 0.8 * accent,
         bob=0.004 * math.sin(t * 1.9) + bounce,
-        beat=max(0.0, min(1.0, (rms - 0.25) * 1.6)) * min(1.2, spec.energy + 0.3),
+        beat=max(0.0, min(1.0, (rms - 0.25) * 1.6)) * min(1.3, spec.energy + 0.2 + 0.4 * power),
         wave=t * 12,
         shake=shake,
     )
-    emote = None
-    emote_t = t
-    if talking:
-        if turn.emotion == "surprise" and t < 1.8:
-            emote = "exclaim"
-        elif turn.emotion in EMO_EMOTE and not turn.sarcasm:
-            emote = EMO_EMOTE[turn.emotion]
-        elif turn.text.rstrip().endswith("?") and t > plan.speech / FPS - 1.6:
-            emote = "question"
-            emote_t = t - (plan.speech / FPS - 1.6)
-    return act, emote, emote_t
+    emote = beat.emote if talking else None
+    if emote and since > EMOTE_HOLD.get(emote, 99.0):
+        emote = None
+    if talking and not emote and mood == "neutral" and beat.text.rstrip().endswith("?") and e0 - i < FPS * 1.6:
+        emote, since = "question", (i - (e0 - FPS * 1.6)) / FPS
+    return act, emote, since
 
 
 def _listener_act(plan: TurnPlan, spec: Personality, i: int, gf: int) -> tuple[Act, str | None, float]:
     t = i / FPS
     seed = plan.listener.sprite_index * 7 + 3 if plan.listener else 0
     idle = IDLE_POSE.get(spec.id, "relaxed")
-    expr_r, pose_r, emote_r = plan.reaction
-    reacting = i >= plan.react_start
-    if reacting:
-        pose = blend_pose(POSES[idle], POSES[pose_r], _ease((i - plan.react_start) / 8))
-        expr = expr_r
+    lag = int(0.35 * FPS)
+    spans = plan.beat_spans
+    if i >= plan.speech:
+        cur, start, prev_pose, mood = plan.reaction, plan.speech, POSES[_reaction_to(spans[-1][2].mood, spans[-1][2].intensity, spec)[1]], "final"
+    elif i < spans[0][0] + lag:
+        cur, start, prev_pose, mood = ("neutral", idle, None), 0, POSES[idle], "neutral"
     else:
-        pose = POSES[idle]
-        expr = "neutral"
+        n = _beat_index(spans, i, lag)
+        b = spans[n][2]
+        cur, start, mood = _reaction_to(b.mood, b.intensity, spec), spans[n][0] + lag, b.mood
+        prev_pose = POSES[_reaction_to(spans[n - 1][2].mood, spans[n - 1][2].intensity, spec)[1]] if n else POSES[idle]
+    expr, pose_name, emote = cur
+    since = (i - start) / FPS
+    pose = blend_pose(prev_pose, POSES[pose_name], _ease(since * FPS / 8))
+    nod_amp = 0.65 if mood in NOD_MOODS else (0.3 if expr in {"neutral", "happy"} else 0.0)
+    shake_head = 4.5 * math.sin(since * 12) * math.exp(-since * 1.2) if (mood in {"disagree", "sarcastic"} and spec.id in {"cynic", "spark", "cool"}) else 0.0
     act = Act(
         pose=pose,
         expr=expr,
         mouth=0.0,
         blink=_blink(gf, seed),
         look=0.9,
-        tilt=2.5 * math.sin(t * 0.9 + seed),
-        nod=0.4 * max(0.0, math.sin(t * 3.4)) if not reacting or expr_r in {"neutral", "happy"} else 0.0,
+        tilt=2.5 * math.sin(t * 0.9 + seed) + shake_head + (6.0 if expr in {"curious", "thinking"} else 0.0),
+        nod=nod_amp * max(0.0, math.sin(t * 3.4)),
         bob=0.004 * math.sin(t * 1.7 + 1),
-        shake=1.2 * math.sin(t * 38) if expr == "scared" else (0.5 * math.sin(t * 17) if spec.idle == "fidget" else 0.0),
+        shake=1.2 * math.sin(t * 38) if expr == "scared" else (0.5 * math.sin(t * 17) if (spec.idle == "fidget" or expr == "nervous") else 0.0),
     )
-    emote = emote_r if reacting else None
-    return act, emote, (i - plan.react_start) / FPS
+    if emote and since > EMOTE_HOLD.get(emote, 3.0):
+        emote = None
+    return act, emote, since
 
 
 def _dim(img: Image.Image, f: float) -> Image.Image:
@@ -650,8 +772,6 @@ def _bubble(d: ImageDraw.ImageDraw, plan: TurnPlan, head: tuple[float, float, fl
             page_idx = n
     page = plan.pages[page_idx]
     p_start = plan.page_starts[page_idx]
-    p_end = plan.page_starts[page_idx + 1] if page_idx + 1 < len(plan.pages) else plan.speech
-    progress = (i - p_start) / max(p_end - p_start, 1)
 
     font = load_font(30, "round")
     color = plan.speaker.color
@@ -680,8 +800,7 @@ def _bubble(d: ImageDraw.ImageDraw, plan: TurnPlan, head: tuple[float, float, fl
     d.rounded_rectangle((bx0, by0, bx0 + bw, by1), radius=24, fill=(255, 255, 255), outline=(*color, 255), width=5)
     d.polygon([(base_x - 14, by1 - 8), (base_x + 14, by1 - 8), (tip[0], tip[1] - 9)], fill=(255, 255, 255))
 
-    total_chars = sum(len(line) + 1 for line in page)
-    spoken = progress * total_chars * 1.08
+    spoken = _frame_to_char(plan.beat_spans, i) - plan.page_chars[page_idx] + 2
     y = by0 + pad_y + LINE_H / 2 - 2
     seen = 0
     for line in page:

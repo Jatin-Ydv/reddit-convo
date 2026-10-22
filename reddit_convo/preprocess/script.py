@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from reddit_convo.models import DialogueTurn, Script, Thread
 from reddit_convo.preprocess.graph import assign_speakers, select_comments
-from reddit_convo.preprocess.nlp import pick_scene, tag_text
+from reddit_convo.preprocess.beats import build_beats, dominant_mood, reply_stance
+from reddit_convo.preprocess.nlp import (
+    MOOD_TO_EMOTION,
+    derive_tone,
+    emotion_to_expression,
+    pick_scene,
+    sentence_emotion,
+    tag_text,
+)
 from reddit_convo.render.personality import refine_personalities
 from reddit_convo.textutil import sanitize_spoken, truncate_body
 
@@ -50,8 +58,6 @@ def build_script(
         parent = None if comment.depth == 0 else by_id.get(comment.parent_id)
         reply_to = author_to_speaker.get(parent.author if parent else thread.author, "host")
         reply_text = parent.body if parent else thread.title
-        if reply_to == speaker_id:
-            reply_to = "host"
         tags = tag_text(
             comment.body,
             score=comment.score,
@@ -81,6 +87,10 @@ def build_script(
             )
         )
 
+    tagger = sentence_emotion if "distilbert" in backends else None
+    for turn in turns:
+        attach_beats(turn, tagger)
+
     refine_personalities(graph.speakers, turns)
     return Script(
         post_id=thread.id,
@@ -92,3 +102,20 @@ def build_script(
         turns=turns,
         nlp_backend="+".join(sorted(backends)),
     )
+
+
+def attach_beats(turn: DialogueTurn, tagger=None) -> None:
+    """Sentence-level acting beats; also sharpens a turn-level 'neutral' read."""
+    text = turn.spoken_text or turn.text
+    stance = reply_stance(text) if turn.reply_to else None
+    turn.beats = build_beats(text, sarcastic=turn.sarcasm, reply_mood=stance, model_tagger=tagger)
+    mood, strength = dominant_mood(turn.beats)
+    if mood == "sarcastic" and not turn.sarcasm:
+        turn.sarcasm = True
+        turn.sarcasm_confidence = max(turn.sarcasm_confidence, 0.7)
+    trust_beats = tagger is None or turn.emotion == "neutral"
+    if trust_beats and strength >= 0.45 and mood != "neutral":
+        turn.emotion = MOOD_TO_EMOTION.get(mood, "neutral")
+        turn.emotion_confidence = max(turn.emotion_confidence, strength)
+    turn.tone = derive_tone(turn.emotion, turn.sarcasm, turn.score, turn.reply_to == "host")
+    turn.expression = emotion_to_expression(turn.emotion, turn.sarcasm)

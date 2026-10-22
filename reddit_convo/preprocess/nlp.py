@@ -156,10 +156,12 @@ _FEAR = re.compile(r"\b(afraid|scared|worry|anxious|panic|terrified|nervous)\b",
 _SURPRISE = re.compile(r"\b(wow|whoa|unbelievable|shocked|no way|wait what)\b", re.I)
 _LOVE = re.compile(r"\b(love|heart|adorable|sweet|wholesome|bless)\b", re.I)
 _SARCASM = re.compile(
-    r"(/s\b|yeah right|oh great|sure jan|totally not|as if|wow another|"
-    r"just what i needed|can't wait|imagine thinking)",
+    r"(yeah right|oh great|sure jan|totally not|as if|wow another|"
+    r"just what i needed|imagine thinking)",
     re.I,
 )
+
+_SLASH_S = re.compile(r"(?:^|\s)/s(?:$|[\s.!?])", re.I)
 
 
 class TagResult(dict):
@@ -237,14 +239,31 @@ def _model_tags(text: str) -> tuple[Emotion, float, bool, float] | None:
     sarcasm_score = float(sar.get("score", 0.0))
     if sarcasm_score < SARCASM_FLOOR:
         sarcasm_flag = False
-    if _SARCASM.search(clipped) or "/s" in clipped.lower():
+    if _SARCASM.search(clipped) or _SLASH_S.search(clipped):
         sarcasm_flag = True
         sarcasm_score = max(sarcasm_score, 0.9)
     return emotion_label, emotion_score, sarcasm_flag, sarcasm_score  # type: ignore[return-value]
 
 
+def sentence_emotion(text: str) -> str | None:
+    """Model emotion for a single sentence, or None when only heuristics are available."""
+    modeled = _model_tags(text)
+    return modeled[0] if modeled else None
+
+
+MOOD_TO_EMOTION: dict[str, Emotion] = {
+    "happy": "joy", "excited": "joy", "laugh": "joy", "grateful": "joy", "agree": "joy",
+    "proud": "joy",
+    "love": "love", "sympathetic": "love", "encouraging": "love",
+    "angry": "anger", "disgusted": "anger",
+    "sad": "sadness",
+    "worried": "fear",
+    "surprised": "surprise",
+}
+
+
 def _heuristic_tags(text: str) -> tuple[Emotion, float, bool, float]:
-    sarcasm = bool(_SARCASM.search(text)) or "/s" in text.lower()
+    sarcasm = bool(_SARCASM.search(text) or _SLASH_S.search(text))
     sarcasm_score = 0.9 if sarcasm else 0.1
     checks: list[tuple[Emotion, re.Pattern[str]]] = [
         ("anger", _ANGER),
